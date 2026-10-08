@@ -192,7 +192,7 @@ const char *yes_or_no(int flag) {
 }
 
 const uint16_t dpi_choices[] = { 200, 400, 600, 800, 1200, 1600, 2400, 3200, 4800, 6400, 12000 }; // If we need more, add them.
-#define DPI_CHOICES_LENGTH (sizeof(dpi_choices)/sizeof(dpi_choices[0]))
+_Static_assert(sizeof(dpi_choices) / sizeof(dpi_choices[0]) == DPI_CHOICES_LENGTH, "dpi_choices length != DPI_CHOICES_LENGTH in svalboard.h: that macro is the bound every caller range-checks an index against before indexing dpi_choices, including indices arriving from the host over VIA and from the other half over the split wire, so a stale bound is an out-of-range read feeding a division");
 extern bool is_mac;
 
 // Boost state lives in keymaps/keymap_support.c; surfaced here for output_keyboard_info.
@@ -311,13 +311,27 @@ int16_t get_right_dpi() {
 }
 
 void set_left_dpi(uint8_t index) {
+    if (index >= DPI_CHOICES_LENGTH) index = 0;
     uprintf("LDPI: %d %d\n", index, dpi_choices[index]);
+#if defined(POINTING_DEVICE_ENABLE) && defined(SPLIT_POINTING_ENABLE) && defined(POINTING_DEVICE_COMBINED)
     pointing_device_set_cpi_on_side(true, dpi_choices[index]);
+#elif defined(POINTING_DEVICE_ENABLE)
+    if (is_keyboard_left()) pointing_device_set_cpi(dpi_choices[index]);
+#else
+    (void)index;
+#endif
 }
 
 void set_right_dpi(uint8_t index) {
+    if (index >= DPI_CHOICES_LENGTH) index = 0;
     uprintf("RDPI: %d %d\n", index, dpi_choices[index]);
+#if defined(POINTING_DEVICE_ENABLE) && defined(SPLIT_POINTING_ENABLE) && defined(POINTING_DEVICE_COMBINED)
     pointing_device_set_cpi_on_side(false, dpi_choices[index]);
+#elif defined(POINTING_DEVICE_ENABLE)
+    if (!is_keyboard_left()) pointing_device_set_cpi(dpi_choices[index]);
+#else
+    (void)index;
+#endif
 }
 
 void set_dpi_from_eeprom(void) {

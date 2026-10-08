@@ -94,6 +94,7 @@ void increase_left_dpi(void);
 void increase_right_dpi(void);
 void decrease_left_dpi(void);
 void decrease_right_dpi(void);
+#define DPI_CHOICES_LENGTH 11
 void set_left_dpi(uint8_t index);
 void set_right_dpi(uint8_t index);
 void set_dpi_from_eeprom(void);

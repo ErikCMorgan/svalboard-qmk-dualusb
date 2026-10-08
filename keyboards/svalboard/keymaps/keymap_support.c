@@ -49,8 +49,29 @@ void mouse_mode(bool);
 bool mouse_mode_enabled = false;
 
 // Automouse threshold accumulator (normalized to 800 DPI)
-static int32_t automouse_accumulator = 0;
+static int32_t  automouse_accumulator = 0;
 static uint16_t automouse_accumulator_timer = 0;
+
+#define AUTOMOUSE_ACCUMULATOR_MAX (INT32_MAX / 2)
+
+#if defined(SVAL_DUALUSB) && !defined(INIT_EE_HANDS_LEFT)
+static bool sval_automouse_request = false;
+#endif
+
+static void sval_automouse_signal(void) {
+#if defined(SVAL_DUALUSB) && !defined(INIT_EE_HANDS_LEFT)
+    sval_automouse_request = true;
+#else
+    mouse_mode(true);
+#endif
+}
+
+#if defined(SVAL_DUALUSB) && !defined(INIT_EE_HANDS_LEFT)
+static void sval_automouse_reset(void) {
+    automouse_accumulator       = 0;
+    automouse_accumulator_timer = timer_read();
+}
+#endif
 
 axis_scale_t l_x = {1, SCROLL_DIVISOR, SCROLL_MULTIPLIER};
 axis_scale_t l_y = {1, SCROLL_DIVISOR, SCROLL_MULTIPLIER};
@@ -120,6 +141,20 @@ uint8_t boost_hold_5 = 0;
 bool boost_toggle_2 = false;
 bool boost_toggle_3 = false;
 bool boost_toggle_5 = false;
+
+bool enable_flywheel = false;
+
+static int16_t fw_h;
+static int16_t fw_v;
+static bool    fw_coasting;
+
+static int16_t fw_peak(int16_t peak, int16_t sample) {
+    int32_t a = peak < 0 ? -peak : peak;
+    int32_t b = sample < 0 ? -sample : sample;
+    if (b > a) return sample;
+    if ((peak < 0) != (sample < 0) && sample != 0) return sample;
+    return peak;
+}
 
 #define any_boost_active() (boost_hold_2 + boost_toggle_2 + \
     boost_hold_3 + boost_toggle_3 + boost_hold_5 + boost_toggle_5 > 0)
@@ -238,7 +273,21 @@ void update_boost_multiplier(void) {
 }
 
 
-report_mouse_t pointing_device_task_combined_user(report_mouse_t reportMouse1, report_mouse_t reportMouse2) {
+static report_mouse_t sval_combine_reports(report_mouse_t left_report, report_mouse_t right_report) {
+    int32_t x = (int32_t)left_report.x + right_report.x;
+    int32_t y = (int32_t)left_report.y + right_report.y;
+    int32_t h = (int32_t)left_report.h + right_report.h;
+    int32_t v = (int32_t)left_report.v + right_report.v;
+
+    left_report.x = (x > MOUSE_REPORT_XY_MAX) ? MOUSE_REPORT_XY_MAX : ((x < MOUSE_REPORT_XY_MIN) ? MOUSE_REPORT_XY_MIN : x);
+    left_report.y = (y > MOUSE_REPORT_XY_MAX) ? MOUSE_REPORT_XY_MAX : ((y < MOUSE_REPORT_XY_MIN) ? MOUSE_REPORT_XY_MIN : y);
+    left_report.h = (h > MOUSE_REPORT_HV_MAX) ? MOUSE_REPORT_HV_MAX : ((h < MOUSE_REPORT_HV_MIN) ? MOUSE_REPORT_HV_MIN : h);
+    left_report.v = (v > MOUSE_REPORT_HV_MAX) ? MOUSE_REPORT_HV_MAX : ((v < MOUSE_REPORT_HV_MIN) ? MOUSE_REPORT_HV_MIN : v);
+    left_report.buttons |= right_report.buttons;
+    return left_report;
+}
+
+report_mouse_t sval_pointer_pipeline(report_mouse_t reportMouse1, report_mouse_t reportMouse2) {
     report_mouse_t ret_mouse;
 
     if (any_sniper_active()) {
@@ -266,8 +315,20 @@ report_mouse_t pointing_device_task_combined_user(report_mouse_t reportMouse1, r
         reportMouse2.v = add_to_axis(&boost_v, reportMouse2.v);
     }
 
-    if (reportMouse1.x == 0 && reportMouse1.y == 0 && reportMouse2.x == 0 && reportMouse2.y == 0)
-        return pointing_device_combine_reports(reportMouse1, reportMouse2);
+    if (!enable_flywheel) {
+        fw_h        = 0;
+        fw_v        = 0;
+        fw_coasting = false;
+    }
+
+    bool coasting = enable_flywheel && (fw_h != 0 || fw_v != 0);
+
+    if (coasting) sval_automouse_signal();
+
+    if (reportMouse1.x == 0 && reportMouse1.y == 0 && reportMouse1.h == 0 && reportMouse1.v == 0 &&
+        reportMouse2.x == 0 && reportMouse2.y == 0 && reportMouse2.h == 0 && reportMouse2.v == 0 &&
+        !scroll_timer_running && !coasting)
+        return sval_combine_reports(reportMouse1, reportMouse2);
 
     // Track scroll input BEFORE division (h/v after division may be 0 due to accumulation)
     bool left_scrolling = (global_saved_values.left_scroll != scroll_hold) != scroll_toggle;
@@ -291,11 +352,15 @@ report_mouse_t pointing_device_task_combined_user(report_mouse_t reportMouse1, r
             automouse_accumulator = 0;
         }
         automouse_accumulator_timer = timer_read();
-        automouse_accumulator += normalized_movement;
+        if (automouse_accumulator > AUTOMOUSE_ACCUMULATOR_MAX - normalized_movement) {
+            automouse_accumulator = AUTOMOUSE_ACCUMULATOR_MAX;
+        } else {
+            automouse_accumulator += normalized_movement;
+        }
 
         if (global_saved_values.automouse_threshold == 0 ||
             automouse_accumulator >= global_saved_values.automouse_threshold) {
-            mouse_mode(true);
+            sval_automouse_signal();
         }
     }
 
@@ -314,7 +379,7 @@ report_mouse_t pointing_device_task_combined_user(report_mouse_t reportMouse1, r
         reportMouse2.y = 0;
     }
 
-    if (has_scroll_input && !scroll_timer_running) {
+    if ((has_scroll_input || coasting) && !scroll_timer_running) {
         scroll_timer_running = true;
         scroll_timer = timer_read();
     }
@@ -346,6 +411,23 @@ report_mouse_t pointing_device_task_combined_user(report_mouse_t reportMouse1, r
             reportMouse1.v = scroll_accumulator_v;
         }
 
+        if (enable_flywheel) {
+            if (scroll_accumulator_h || scroll_accumulator_v) {
+                if (fw_coasting) {
+                    fw_h = reportMouse1.h;
+                    fw_v = reportMouse1.v;
+                } else {
+                    fw_h = fw_peak(fw_h, reportMouse1.h);
+                    fw_v = fw_peak(fw_v, reportMouse1.v);
+                }
+                fw_coasting = false;
+            } else {
+                fw_coasting = true;
+            }
+            reportMouse1.h = fw_h;
+            reportMouse1.v = fw_v;
+        }
+
         scroll_timer_running = false;
         scroll_accumulator_h = 0;
         scroll_accumulator_v = 0;
@@ -353,24 +435,32 @@ report_mouse_t pointing_device_task_combined_user(report_mouse_t reportMouse1, r
 	m_scroll_accumulator_v = 0;
     }
 
-    ret_mouse = pointing_device_combine_reports(reportMouse1, reportMouse2);
+    ret_mouse = sval_combine_reports(reportMouse1, reportMouse2);
 
     if (global_saved_values.natural_scroll) {
         ret_mouse.v = -ret_mouse.v;
     }
 
-    return pointing_device_task_user(ret_mouse);
+    return ret_mouse;
 }
+
+#if defined(SPLIT_POINTING_ENABLE) && defined(POINTING_DEVICE_COMBINED)
+report_mouse_t pointing_device_task_combined_user(report_mouse_t reportMouse1, report_mouse_t reportMouse2) {
+    return pointing_device_task_user(sval_pointer_pipeline(reportMouse1, reportMouse2));
+}
+#endif
 
 void toggle_axis_scroll_lock(void) {
     global_saved_values.axis_scroll_lock = !global_saved_values.axis_scroll_lock;
     write_eeprom_kb();
 }
 
+#ifndef SVAL_DUALUSB
 report_mouse_t pointing_device_task_user(report_mouse_t reportMouse) {
     // Threshold check is done in pointing_device_task_combined_user
     return reportMouse;
 }
+#endif
 #endif
 
 void mh_change_timeouts(void) {
@@ -456,7 +546,8 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
                         keycode == SV_SNIPER_5_TG || \
                         keycode == SV_BOOST_2_TG || \
                         keycode == SV_BOOST_3_TG || \
-                        keycode == SV_BOOST_5_TG)
+                        keycode == SV_BOOST_5_TG || \
+                        keycode == SV_FLYWHEEL)
 
         uint16_t layer_keycode = keymap_key_to_keycode(MH_AUTO_BUTTONS_LAYER, record->event.key);
         if (MOUSE_PASSTHROUGH_KEYCODE) {
@@ -602,6 +693,9 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
                 boost_toggle_5 = !boost_toggle_5;
                 update_boost_multiplier();
                 return false;
+            case SV_FLYWHEEL:
+                enable_flywheel = true;
+                return false;
         }
     } else { // key released
         switch (keycode) {
@@ -647,6 +741,9 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
             case SV_BOOST_2_TG:
             case SV_BOOST_3_TG:
             case SV_BOOST_5_TG:
+                return false;
+            case SV_FLYWHEEL:
+                enable_flywheel = false;
                 return false;
             case SV_SCROLL_HOLD:
                 scroll_hold = false;
